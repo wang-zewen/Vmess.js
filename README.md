@@ -20,5 +20,5 @@
 
 
 ```
-bash <(curl -sL https://raw.githubusercontent.com/wang-zewen/vmess.js/main/x-ray-ui.sh)
+bash <(curl -sL https://raw.githubusercontent.com/wang-zewen/sub_link/main/vmess.sh)
 ```

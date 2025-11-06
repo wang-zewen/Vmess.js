@@ -46,6 +46,16 @@ echo -e "${green}✅ 服务器 IP: ${SERVER_IP}${plain}"
 
 # ==================== 停止旧进程 ====================
 pkill -f "x-ui" 2>/dev/null || true
+sleep 1
+
+# ==================== 备份旧数据 ====================
+if [ -d "x-ui/db" ]; then
+    echo -e "${yellow}📦 备份旧数据...${plain}"
+    cp -r x-ui/db db_backup_$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+fi
+
+# ==================== 清理旧文件 ====================
+rm -rf x-ui bin *.tar.gz 2>/dev/null || true
 
 # ==================== 下载 x-ui ====================
 echo -e "${yellow}📥 正在下载 x-ui...${plain}"
@@ -64,15 +74,12 @@ echo -e "${green}检测到 x-ui 版本：${last_version}${plain}"
 download_url="https://github.com/vaxilu/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
 echo -e "${yellow}📥 下载地址: ${download_url}${plain}"
 
-wget -N --no-check-certificate -O x-ui-linux-${arch}.tar.gz ${download_url} 2>&1 | grep -v "^$"
+wget -q --show-progress --no-check-certificate -O x-ui.tar.gz ${download_url}
 
 if [[ $? -ne 0 ]]; then
     echo -e "${red}❌ 下载失败，尝试备用源...${plain}"
-    
-    # 尝试使用代理或镜像
     download_url="https://ghproxy.com/https://github.com/vaxilu/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
-    
-    wget -N --no-check-certificate -O x-ui-linux-${arch}.tar.gz ${download_url}
+    wget -q --show-progress --no-check-certificate -O x-ui.tar.gz ${download_url}
     
     if [[ $? -ne 0 ]]; then
         echo -e "${red}❌ 下载失败，请检查网络连接${plain}"
@@ -82,45 +89,74 @@ fi
 
 echo -e "${green}✅ 下载完成${plain}"
 
-# ==================== 解压 ====================
+# ==================== 解压并检查结构 ====================
 echo -e "${yellow}📦 解压文件...${plain}"
 
-# 删除旧文件
-rm -rf x-ui bin
-
-# 解压
-tar zxf x-ui-linux-${arch}.tar.gz 2>&1 | grep -v "^$"
+# 解压到当前目录
+tar -zxf x-ui.tar.gz
 
 if [[ $? -ne 0 ]]; then
     echo -e "${red}❌ 解压失败${plain}"
     exit 1
 fi
 
-# 检查解压结果
-if [[ ! -d "x-ui" ]]; then
-    echo -e "${red}❌ 解压后未找到 x-ui 目录${plain}"
+# 检查解压后的结构
+echo -e "${yellow}🔍 检查解压结构...${plain}"
+ls -la
+
+# 查找 x-ui 可执行文件
+if [ -f "x-ui/x-ui" ]; then
+    echo -e "${green}✅ 找到标准结构: x-ui/x-ui${plain}"
+    XUI_DIR="x-ui"
+elif [ -f "x-ui" ]; then
+    echo -e "${green}✅ 找到扁平结构: ./x-ui${plain}"
+    XUI_DIR="."
+    # 创建标准目录结构
+    mkdir -p x-ui/bin
+    mv x-ui x-ui/
+    [ -d "bin" ] && mv bin/* x-ui/bin/ 2>/dev/null || true
+    [ -f "xray-linux-${arch}" ] && mv xray-linux-${arch} x-ui/bin/ 2>/dev/null || true
+    XUI_DIR="x-ui"
+else
+    echo -e "${red}❌ 未找到 x-ui 可执行文件${plain}"
+    echo -e "${yellow}当前目录内容：${plain}"
+    find . -name "x-ui" -o -name "xray*"
     exit 1
 fi
 
-# 进入目录
-cd x-ui
+# 进入 x-ui 目录
+cd "$XUI_DIR"
 
 # 设置权限
-chmod +x x-ui
-chmod +x bin/xray-linux-${arch}
+chmod +x x-ui 2>/dev/null || true
+chmod +x bin/xray-linux-${arch} 2>/dev/null || true
+
+# 如果 bin 目录中的 xray 名字不对，重命名
+if [ -d "bin" ]; then
+    cd bin
+    for f in xray*; do
+        if [ -f "$f" ] && [ "$f" != "xray-linux-${arch}" ]; then
+            mv "$f" "xray-linux-${arch}" 2>/dev/null || true
+        fi
+    done
+    chmod +x xray-linux-${arch} 2>/dev/null || true
+    cd ..
+fi
 
 echo -e "${green}✅ 解压完成${plain}"
 
 # ==================== 创建数据库目录 ====================
 mkdir -p db
 
-# ==================== 初始化数据库（设置用户名密码）====================
-echo -e "${yellow}⚙️  初始化配置...${plain}"
-
-# 创建初始数据库
-cat > db/x-ui.db.init << EOF
--- 这个文件用于标记初始化
-EOF
+# 恢复备份的数据库
+if [ -d "../db_backup_"* ]; then
+    LATEST_BACKUP=$(ls -td ../db_backup_* | head -1)
+    if [ -d "$LATEST_BACKUP" ]; then
+        echo -e "${yellow}📦 恢复数据库备份...${plain}"
+        cp -r "$LATEST_BACKUP"/* db/ 2>/dev/null || true
+        echo -e "${green}✅ 数据库已恢复${plain}"
+    fi
+fi
 
 # ==================== 创建启动脚本 ====================
 cat > ../start.sh << STARTEOF
@@ -140,31 +176,30 @@ echo "👤 用户: ${XUI_USER}"
 echo "🔑 密码: ${XUI_PASS}"
 echo "=========================================="
 echo ""
-echo "⏳ 首次启动需要初始化，请稍候..."
-echo ""
 
 # 首次运行时设置用户名密码和端口
-if [ ! -f "db/x-ui.db" ]; then
+if [ ! -f "db/x-ui.db" ] || [ ! -s "db/x-ui.db" ]; then
     echo "🔧 首次运行，正在初始化..."
     
-    # 启动 x-ui 5秒钟让它创建数据库
+    # 启动 x-ui 让它创建数据库
     timeout 5 ./x-ui > /dev/null 2>&1 || true
     sleep 2
     
     # 设置用户名密码
     if [ -f "db/x-ui.db" ]; then
-        ./x-ui setting -username "${XUI_USER}" -password "${XUI_PASS}" 2>/dev/null || true
-        ./x-ui setting -port ${XUI_PORT} 2>/dev/null || true
+        ./x-ui setting -username "${XUI_USER}" -password "${XUI_PASS}" 2>/dev/null || echo "⚠️  请手动设置用户名密码"
+        ./x-ui setting -port ${XUI_PORT} 2>/dev/null || echo "⚠️  请手动设置端口"
         echo "✅ 初始化完成"
     fi
 fi
 
 # 启动主进程
-echo "🚀 启动 x-ui..."
+echo "🚀 x-ui 正在运行..."
+echo "📝 按 Ctrl+C 停止"
 echo ""
 
 while true; do
-    ./x-ui 2>&1 | tee x-ui.log
+    ./x-ui
     echo ""
     echo "⚠️  x-ui 已停止，5秒后自动重启..."
     sleep 5
@@ -182,32 +217,40 @@ XUI_DIR="$HOME/x-ui/x-ui"
 case "$1" in
     start)
         cd "$HOME/x-ui"
-        nohup bash start.sh > /dev/null 2>&1 &
-        echo "x-ui 已启动"
+        nohup bash start.sh > xui.log 2>&1 &
+        echo "✅ x-ui 已后台启动"
+        echo "📝 查看日志: tail -f $HOME/x-ui/xui.log"
         ;;
     stop)
         pkill -f "x-ui/x-ui"
-        echo "x-ui 已停止"
+        echo "✅ x-ui 已停止"
         ;;
     restart)
         pkill -f "x-ui/x-ui"
         sleep 2
         cd "$HOME/x-ui"
-        nohup bash start.sh > /dev/null 2>&1 &
-        echo "x-ui 已重启"
+        nohup bash start.sh > xui.log 2>&1 &
+        echo "✅ x-ui 已重启"
         ;;
     status)
         if pgrep -f "x-ui/x-ui" > /dev/null; then
-            echo "x-ui 正在运行"
+            echo "✅ x-ui 正在运行"
+            echo "进程ID: $(pgrep -f 'x-ui/x-ui')"
         else
-            echo "x-ui 未运行"
+            echo "❌ x-ui 未运行"
         fi
         ;;
     log)
-        tail -f "$HOME/x-ui/x-ui/x-ui.log"
+        tail -f "$HOME/x-ui/xui.log" 2>/dev/null || tail -f "$HOME/x-ui/x-ui/x-ui.log"
         ;;
     *)
         echo "用法: $0 {start|stop|restart|status|log}"
+        echo ""
+        echo "  start   - 后台启动 x-ui"
+        echo "  stop    - 停止 x-ui"
+        echo "  restart - 重启 x-ui"
+        echo "  status  - 查看状态"
+        echo "  log     - 查看日志"
         exit 1
         ;;
 esac
@@ -217,7 +260,7 @@ chmod +x ../x-ui.sh
 
 # ==================== 清理 ====================
 cd "$INSTALL_DIR"
-rm -f x-ui-linux-${arch}.tar.gz
+rm -f x-ui.tar.gz
 
 # ==================== 保存配置信息 ====================
 cat > x-ui-info.txt << EOF
@@ -233,18 +276,17 @@ x-ui 安装信息
 ========================================
 管理命令
 ========================================
-启动: cd ${INSTALL_DIR} && bash start.sh
-后台启动: cd ${INSTALL_DIR} && nohup bash start.sh > /dev/null 2>&1 &
-停止: pkill -f x-ui
-查看日志: tail -f ${INSTALL_DIR}/x-ui/x-ui.log
-查看配置: cat ${INSTALL_DIR}/x-ui-info.txt
+前台启动: cd ${INSTALL_DIR} && bash start.sh
+后台启动: ${INSTALL_DIR}/x-ui.sh start
+停止服务: ${INSTALL_DIR}/x-ui.sh stop
+重启服务: ${INSTALL_DIR}/x-ui.sh restart
+查看状态: ${INSTALL_DIR}/x-ui.sh status
+查看日志: ${INSTALL_DIR}/x-ui.sh log
 
-或使用管理脚本:
-${INSTALL_DIR}/x-ui.sh start    # 启动
-${INSTALL_DIR}/x-ui.sh stop     # 停止
-${INSTALL_DIR}/x-ui.sh restart  # 重启
-${INSTALL_DIR}/x-ui.sh status   # 状态
-${INSTALL_DIR}/x-ui.sh log      # 日志
+或直接操作:
+启动: cd ${INSTALL_DIR} && bash start.sh
+停止: pkill -f x-ui
+日志: tail -f ${INSTALL_DIR}/xui.log
 
 ========================================
 重要提示
@@ -270,7 +312,8 @@ echo ""
 echo -e "${green}========================================${plain}"
 echo -e "${yellow}🚀 启动命令:${plain}"
 echo ""
-echo -e "   cd ${INSTALL_DIR} && bash start.sh"
+echo -e "   前台运行: cd ${INSTALL_DIR} && bash start.sh"
+echo -e "   后台运行: ${INSTALL_DIR}/x-ui.sh start"
 echo ""
 echo -e "${yellow}📝 查看配置:${plain}"
 echo -e "   cat ${INSTALL_DIR}/x-ui-info.txt"
@@ -279,7 +322,7 @@ echo -e "${green}========================================${plain}"
 echo ""
 
 # ==================== 询问是否立即启动 ====================
-read -p "是否立即启动 x-ui? (y/n): " START_NOW
+read -p "是否立即启动 x-ui? [y/n]: " START_NOW
 
 if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
     echo ""
@@ -291,5 +334,7 @@ else
     echo ""
     echo -e "${yellow}稍后手动启动:${plain}"
     echo -e "   cd ${INSTALL_DIR} && bash start.sh"
+    echo -e "   或"
+    echo -e "   ${INSTALL_DIR}/x-ui.sh start"
     echo ""
 fi

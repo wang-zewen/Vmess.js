@@ -11,7 +11,7 @@ XUI_USER=${XUI_USER:-admin}
 XUI_PASS=${XUI_PASS:-admin}
 
 echo -e "${green}========================================${plain}"
-echo -e "${green}🚀 x-ui 免 Root 安装脚本${plain}"
+echo -e "${green}🚀 x-ui 免 Root 安装脚本2${plain}"
 echo -e "${green}========================================${plain}"
 echo ""
 

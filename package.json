@@ -1,0 +1,23 @@
+{
+  "name": "vmess-wispbyte-deploy",
+  "version": "1.0.0",
+  "description": "One-click VMess server deployment for WispByte and other platforms",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "vmess",
+    "v2ray",
+    "xray",
+    "proxy",
+    "wispbyte"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {}
+}

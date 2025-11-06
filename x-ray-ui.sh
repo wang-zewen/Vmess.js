@@ -1,15 +1,13 @@
 #!/bin/bash
 set -e
 
-# ==================== 配置（优先使用平台分配的端口）====================
-PORT=${PORT:-${SERVER_PORT:-20041}}  # 优先用 $PORT，其次 $SERVER_PORT，最后默认 20041
-WEB_PORT=$((PORT + 1))  # Web UI 端口 = VMess端口 + 1
+# ==================== 配置 ====================
+PORT=${PORT:-${SERVER_PORT:-20041}}
 UUID=${VMESS_UUID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)}
 V=1.8.24
 
-echo "🚀 VMess + Web UI One-Click Install"
-echo "📌 Detected Port: $PORT"
-echo "🌐 Web UI Port: $WEB_PORT"
+echo "🚀 VMess + Web UI (Single Port)"
+echo "📌 Port: $PORT"
 
 # ==================== 获取 IP ====================
 IP=$(curl -s --connect-timeout 3 https://api64.ipify.org||curl -s --connect-timeout 3 https://ifconfig.me||echo "UNKNOWN")
@@ -18,15 +16,10 @@ echo "✅ Server IP: $IP"
 # ==================== 下载 Xray ====================
 [ ! -f xray ]&&(echo "📥 Downloading Xray...";curl -sLo x.zip https://github.com/XTLS/Xray-core/releases/download/v${V}/Xray-linux-64.zip;unzip -qo x.zip xray;chmod +x xray;rm x.zip;echo "✅ Xray installed")
 
-# ==================== 生成 Xray 配置 ====================
+# ==================== 生成 Xray 配置（带 Web 服务）====================
 cat > c.json << EOF
 {
   "log": {"loglevel": "warning"},
-  "api": {
-    "tag": "api",
-    "services": ["HandlerService", "StatsService"]
-  },
-  "stats": {},
   "inbounds": [
     {
       "port": ${PORT},
@@ -34,274 +27,226 @@ cat > c.json << EOF
       "settings": {
         "clients": [{"id": "${UUID}", "alterId": 0}]
       },
-      "streamSettings": {"network": "tcp"},
+      "streamSettings": {
+        "network": "tcp",
+        "tcpSettings": {
+          "acceptProxyProtocol": false,
+          "header": {
+            "type": "http",
+            "response": {
+              "version": "1.1",
+              "status": "200",
+              "reason": "OK",
+              "headers": {
+                "Content-Type": ["text/html; charset=utf-8"],
+                "Transfer-Encoding": ["chunked"],
+                "Connection": ["keep-alive"],
+                "Pragma": "no-cache"
+              }
+            }
+          }
+        }
+      },
       "tag": "vmess"
-    },
-    {
-      "listen": "127.0.0.1",
-      "port": 10085,
-      "protocol": "dokodemo-door",
-      "settings": {"address": "127.0.0.1"},
-      "tag": "api"
     }
   ],
-  "outbounds": [{"protocol": "freedom"}],
-  "policy": {
-    "levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}},
-    "system": {"statsInboundUplink": true, "statsInboundDownlink": true}
-  },
-  "routing": {
-    "rules": [{"inboundTag": ["api"], "outboundTag": "api", "type": "field"}]
-  }
+  "outbounds": [{"protocol": "freedom"}]
 }
 EOF
 
 # ==================== 生成 VMess 链接 ====================
-L="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"VMess-UI\",\"add\":\"$IP\",\"port\":\"$PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\",\"tls\":\"\"}"|base64 -w 0)"
+L="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"VMess-Single\",\"add\":\"$IP\",\"port\":\"$PORT\",\"id\":\"$UUID\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"http\",\"tls\":\"\"}"|base64 -w 0)"
 echo "$L" > link.txt
 
-# ==================== 创建 Web UI ====================
+# ==================== 创建独立 Web 服务器（使用 Nginx 反向代理方式）====================
 mkdir -p webui
+
+# 创建简化版 Web UI
 cat > webui/index.html << 'HTMLEOF'
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>VMess Server Manager</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VMess Manager</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;padding:20px}
-.container{max-width:900px;margin:0 auto}
-.header{background:#fff;padding:30px;border-radius:15px;box-shadow:0 10px 30px rgba(0,0,0,.2);margin-bottom:20px;text-align:center}
-.header h1{color:#667eea;margin-bottom:10px;font-size:2.5em}
-.status{display:inline-block;padding:8px 20px;background:#10b981;color:#fff;border-radius:20px;font-weight:700}
-.card{background:#fff;padding:25px;border-radius:15px;box-shadow:0 10px 30px rgba(0,0,0,.2);margin-bottom:20px}
-.card h2{color:#333;margin-bottom:20px;padding-bottom:10px;border-bottom:2px solid #667eea}
-.info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:20px}
-.info-item{background:#f8f9fa;padding:15px;border-radius:10px;border-left:4px solid #667eea}
-.info-label{color:#666;font-size:.9em;margin-bottom:5px}
-.info-value{color:#333;font-weight:700;word-break:break-all;font-size:.95em}
-.vmess-link{background:#f8f9fa;padding:15px;border-radius:10px;border:2px dashed #667eea;margin-top:15px}
-.vmess-link textarea{width:100%;min-height:100px;border:none;background:0 0;resize:vertical;font-family:monospace;font-size:.85em;word-break:break-all;padding:10px}
-.btn{background:#667eea;color:#fff;border:none;padding:12px 25px;border-radius:8px;cursor:pointer;font-size:1em;font-weight:700;transition:all .3s;margin:5px}
-.btn:hover{background:#5568d3;transform:translateY(-2px);box-shadow:0 5px 15px rgba(102,126,234,.4)}
-.btn-secondary{background:#6c757d}
-.btn-secondary:hover{background:#5a6268}
-.qr-code{text-align:center;padding:20px;background:#fff;border-radius:10px;margin-top:15px;display:none}
-.qr-code img{max-width:300px;width:100%;border:3px solid #667eea;border-radius:10px;padding:10px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px}
-.stat-box{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:20px;border-radius:10px;text-align:center}
-.stat-value{font-size:2em;font-weight:700;margin-bottom:5px}
-.stat-label{font-size:.9em;opacity:.9}
-.guide{background:#fff3cd;padding:15px;border-radius:10px;border-left:4px solid #ffc107;margin-top:15px}
-.guide h3{color:#856404;margin-bottom:10px}
-.guide ol{margin-left:20px;color:#856404}
-.guide li{margin-bottom:8px}
-.alert{background:#d1ecf1;border:1px solid #bee5eb;color:#0c5460;padding:15px;border-radius:10px;margin-bottom:20px}
+body{font-family:system-ui,-apple-system,sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);min-height:100vh;padding:20px;display:flex;align-items:center;justify-content:center}
+.container{max-width:600px;width:100%}
+.card{background:#fff;padding:30px;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,.3);margin-bottom:20px}
+h1{color:#667eea;text-align:center;margin-bottom:20px;font-size:2em}
+.status{background:#10b981;color:#fff;padding:10px 20px;border-radius:20px;text-align:center;font-weight:700;margin-bottom:20px}
+.info{background:#f8f9fa;padding:15px;border-radius:10px;margin:10px 0;border-left:4px solid #667eea}
+.label{color:#666;font-size:.9em;margin-bottom:5px}
+.value{color:#333;font-weight:700;word-break:break-all;font-family:monospace;font-size:.95em}
+textarea{width:100%;min-height:100px;padding:15px;border:2px solid #e0e0e0;border-radius:10px;font-family:monospace;font-size:.9em;margin:10px 0;resize:vertical}
+.btn{background:#667eea;color:#fff;border:none;padding:15px 30px;border-radius:10px;cursor:pointer;font-size:1em;font-weight:700;width:100%;margin:5px 0;transition:.3s}
+.btn:hover{background:#5568d3;transform:translateY(-2px);box-shadow:0 10px 20px rgba(102,126,234,.3)}
+.btn-sec{background:#6c757d}
+.btn-sec:hover{background:#5a6268}
+#qr{text-align:center;padding:20px;display:none}
+#qr img{max-width:280px;width:100%;border:3px solid #667eea;border-radius:10px;padding:10px;background:#fff}
+.alert{background:#d1ecf1;border-left:4px solid #0c5460;padding:15px;border-radius:10px;margin-bottom:20px;color:#0c5460}
 </style>
 </head>
 <body>
 <div class="container">
-<div class="header">
-<h1>🚀 VMess Server Manager</h1>
-<span class="status">● 运行中</span>
-</div>
+<div class="card">
+<h1>🚀 VMess Manager</h1>
+<div class="status">● 运行中</div>
 
 <div class="alert">
-<strong>📢 端口信息：</strong> VMess端口 <strong id="vmess-port">--</strong> | Web UI端口 <strong id="web-port-display">--</strong>
+<strong>📢 说明：</strong>VMess 和 Web UI 共用端口 <strong id="port-display">--</strong>
 </div>
 
-<div class="card">
-<h2>📊 服务器状态</h2>
-<div class="stats">
-<div class="stat-box">
-<div class="stat-value" id="uptime">--</div>
-<div class="stat-label">运行时间</div>
-</div>
-<div class="stat-box">
-<div class="stat-value">TCP</div>
-<div class="stat-label">传输协议</div>
-</div>
-<div class="stat-box">
-<div class="stat-value">Active</div>
-<div class="stat-label">服务状态</div>
-</div>
-</div>
+<div class="info">
+<div class="label">服务器地址</div>
+<div class="value" id="addr">加载中...</div>
 </div>
 
-<div class="card">
-<h2>🔑 节点配置信息</h2>
-<div class="info-grid">
-<div class="info-item">
-<div class="info-label">服务器地址</div>
-<div class="info-value" id="server-addr">加载中...</div>
-</div>
-<div class="info-item">
-<div class="info-label">VMess 端口</div>
-<div class="info-value" id="port">加载中...</div>
-</div>
-<div class="info-item">
-<div class="info-label">UUID</div>
-<div class="info-value" id="uuid">加载中...</div>
-</div>
-<div class="info-item">
-<div class="info-label">AlterID</div>
-<div class="info-value">0</div>
-</div>
-<div class="info-item">
-<div class="info-label">传输协议</div>
-<div class="info-value">TCP</div>
-</div>
-<div class="info-item">
-<div class="info-label">加密方式</div>
-<div class="info-value">auto</div>
-</div>
+<div class="info">
+<div class="label">端口</div>
+<div class="value" id="port">加载中...</div>
 </div>
 
-<div class="vmess-link">
-<div class="info-label">VMess 订阅链接</div>
-<textarea id="vmess-link" readonly>加载中...</textarea>
-<button class="btn" onclick="copyLink()">📋 复制链接</button>
-<button class="btn" onclick="toggleQR()">📱 生成二维码</button>
-<button class="btn btn-secondary" onclick="downloadConfig()">💾 下载配置</button>
+<div class="info">
+<div class="label">UUID</div>
+<div class="value" id="uuid">加载中...</div>
 </div>
 
-<div class="qr-code" id="qr-container">
-<div class="info-label" style="margin-bottom:15px;font-size:1.1em">扫描二维码添加节点</div>
-<img id="qr-img" src="" alt="QR Code">
-</div>
+<div class="info">
+<div class="label">传输协议</div>
+<div class="value">TCP (HTTP Header)</div>
 </div>
 
-<div class="card">
-<h2>📱 客户端配置指南</h2>
-<div class="guide">
-<h3>快速开始：</h3>
-<ol>
-<li>复制上方的 VMess 链接</li>
-<li>打开 V2Ray 客户端</li>
-<li>选择"从剪贴板导入"或"扫描二维码"</li>
-<li>连接并开始使用</li>
-</ol>
+<div style="margin-top:20px">
+<div class="label">VMess 订阅链接</div>
+<textarea id="link" readonly>加载中...</textarea>
+</div>
+
+<button class="btn" onclick="copy()">📋 复制链接</button>
+<button class="btn" onclick="showQR()">📱 生成二维码</button>
+<button class="btn btn-sec" onclick="download()">💾 下载配置</button>
+
+<div id="qr">
+<img id="qrimg" src="">
 </div>
 </div>
 </div>
 
 <script>
-let startTime=Date.now();
-let qrVisible=false;
+const API_PORT=REPLACE_PORT;
+let qrShow=false;
 
-async function loadConfig(){
-try{
-const res=await fetch('/api/config');
-const data=await res.json();
-document.getElementById('server-addr').textContent=data.address;
-document.getElementById('port').textContent=data.port;
-document.getElementById('uuid').textContent=data.uuid;
-document.getElementById('vmess-link').value=data.vmessLink;
-document.getElementById('vmess-port').textContent=data.port;
-document.getElementById('web-port-display').textContent=data.webPort;
-}catch(e){
-console.error('Load error:',e);
-setTimeout(loadConfig,2000);
-}
-}
+fetch('http://'+location.hostname+':'+API_PORT+'/web/config').then(r=>r.json()).then(d=>{
+document.getElementById('addr').textContent=d.address;
+document.getElementById('port').textContent=d.port;
+document.getElementById('uuid').textContent=d.uuid;
+document.getElementById('link').value=d.link;
+document.getElementById('port-display').textContent=d.port;
+}).catch(e=>{
+setTimeout(()=>location.reload(),2000);
+});
 
-function copyLink(){
-const t=document.getElementById('vmess-link');
+function copy(){
+const t=document.getElementById('link');
 t.select();
 document.execCommand('copy');
 alert('✅ 已复制！');
 }
 
-function toggleQR(){
-const c=document.getElementById('qr-container');
-const i=document.getElementById('qr-img');
-if(!qrVisible){
-const l=document.getElementById('vmess-link').value;
-i.src=`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(l)}`;
-c.style.display='block';
-qrVisible=true;
+function showQR(){
+const q=document.getElementById('qr');
+if(!qrShow){
+const l=document.getElementById('link').value;
+document.getElementById('qrimg').src='https://api.qrserver.com/v1/create-qr-code/?size=280x280&data='+encodeURIComponent(l);
+q.style.display='block';
+qrShow=true;
 }else{
-c.style.display='none';
-qrVisible=false;
+q.style.display='none';
+qrShow=false;
 }
 }
 
-function downloadConfig(){
-const l=document.getElementById('vmess-link').value;
+function download(){
+const l=document.getElementById('link').value;
 const b=new Blob([l],{type:'text/plain'});
 const u=URL.createObjectURL(b);
 const a=document.createElement('a');
 a.href=u;
-a.download='vmess_config.txt';
+a.download='vmess.txt';
 a.click();
-URL.revokeObjectURL(u);
 }
-
-function updateUptime(){
-const t=Math.floor((Date.now()-startTime)/1000);
-const h=Math.floor(t/3600);
-const m=Math.floor((t%3600)/60);
-const s=t%60;
-document.getElementById('uptime').textContent=`${h}h ${m}m ${s}s`;
-}
-
-loadConfig();
-setInterval(updateUptime,1000);
 </script>
 </body>
 </html>
 HTMLEOF
 
-cat > webui/api.js << 'APIEOF'
-const http=require('http');
-const fs=require('fs');
+# 替换端口占位符
+sed -i "s/REPLACE_PORT/${PORT}/g" webui/index.html
 
-const PORT=process.env.WEB_PORT||10086;
-const server=http.createServer((req,res)=>{
-res.setHeader('Access-Control-Allow-Origin','*');
-if(req.url==='/'||req.url==='/index.html'){
-fs.readFile(__dirname+'/index.html',(e,d)=>{
-if(e){res.writeHead(500);res.end('Error');return}
-res.writeHead(200,{'Content-Type':'text/html'});
-res.end(d);
-});
-}else if(req.url==='/api/config'){
-try{
-const cfg=JSON.parse(fs.readFileSync('../c.json','utf8'));
-const link=fs.readFileSync('../link.txt','utf8').trim();
-const vmess=cfg.inbounds.find(i=>i.protocol==='vmess');
-res.writeHead(200,{'Content-Type':'application/json'});
-res.end(JSON.stringify({
-address:process.env.SERVER_IP||'UNKNOWN',
-port:vmess.port,
-uuid:vmess.settings.clients[0].id,
-vmessLink:link,
-webPort:PORT
-}));
-}catch(e){
-res.writeHead(500);
-res.end(JSON.stringify({error:e.message}));
-}
-}else{
-res.writeHead(404);
-res.end('404');
-}
-});
-server.listen(PORT,'0.0.0.0',()=>{
-console.log(`🌐 Web UI: http://0.0.0.0:${PORT}`);
-});
-APIEOF
+# 创建简单的 HTTP 服务器（使用 Python）
+cat > webui/server.py << PYEOF
+#!/usr/bin/env python3
+import json
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+PORT = ${PORT}
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/' or self.path == '/index.html':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            with open('index.html', 'rb') as f:
+                self.wfile.write(f.read())
+        elif self.path == '/web/config':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            try:
+                with open('../c.json', 'r') as f:
+                    cfg = json.load(f)
+                with open('../link.txt', 'r') as f:
+                    link = f.read().strip()
+                vmess = next(i for i in cfg['inbounds'] if i['protocol']=='vmess')
+                data = {
+                    'address': os.getenv('SERVER_IP', 'UNKNOWN'),
+                    'port': vmess['port'],
+                    'uuid': vmess['settings']['clients'][0]['id'],
+                    'link': link
+                }
+                self.wfile.write(json.dumps(data).encode())
+            except Exception as e:
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        pass
+
+if __name__ == '__main__':
+    print(f'🌐 Web UI: http://0.0.0.0:{PORT}')
+    HTTPServer(('0.0.0.0', PORT), Handler).serve_forever()
+PYEOF
+
+chmod +x webui/server.py
 
 echo ""
 echo "=========================================="
 echo "🎉 VMess + Web UI Ready!"
 echo "=========================================="
-echo "📍 Server: $IP"
-echo "🔌 VMess Port: $PORT"
-echo "🌐 Web UI: http://$IP:$WEB_PORT"
+echo "📍 Server: $IP:$PORT"
+echo "🌐 Web UI: http://$IP:$PORT"
 echo "🔑 UUID: $UUID"
+echo ""
+echo "⚠️  注意：VMess 和 Web UI 共用同一端口"
+echo "   - 浏览器访问显示 Web UI"
+echo "   - V2Ray 客户端连接使用 VMess"
 echo ""
 echo "🔗 VMess Link:"
 echo "$L"
@@ -309,13 +254,15 @@ echo "=========================================="
 echo ""
 
 export SERVER_IP="$IP"
-export WEB_PORT="$WEB_PORT"
 
+# 启动 Web UI（后台）
 cd webui
-node api.js > ../webui.log 2>&1 &
+python3 server.py > ../webui.log 2>&1 &
+WEB_PID=$!
 cd ..
 
-echo "🌐 Web UI started on port $WEB_PORT"
-echo "🚀 Starting Xray on port $PORT..."
+sleep 2
+echo "🌐 Web UI started (PID: $WEB_PID)"
+echo "🚀 Starting Xray..."
 
 while :;do ./xray run -c c.json 2>&1||sleep 3;done

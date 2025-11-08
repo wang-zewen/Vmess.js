@@ -19,7 +19,7 @@ echo "✅ Server IP: $IP"
 # ==================== 生成 Xray 配置 ====================
 cat > c.json << EOF
 {
-  "log": {"loglevel": "warning"},
+  "log": {"loglevel": "none"},
   "inbounds": [
     {
       "port": ${PORT},
